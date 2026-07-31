@@ -1,1 +1,422 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>カメラでじゃんけん！</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: "Hiragino Maru Gothic ProN", "Meiryo", sans-serif;
+    background: linear-gradient(135deg, #fff6d5, #d5f0ff);
+    text-align: center;
+    padding: 12px;
+    color: #333;
+  }
+  h1 {
+    font-size: 1.6em;
+    margin: 8px 0;
+    color: #ff6f61;
+    text-shadow: 1px 1px 0 #fff;
+  }
+  #status {
+    font-size: 1.3em;
+    font-weight: bold;
+    min-height: 1.6em;
+    margin: 6px 0;
+  }
+  .stage {
+    position: relative;
+    width: 100%;
+    max-width: 480px;
+    margin: 0 auto;
+  }
+  video, canvas {
+    width: 100%;
+    border-radius: 16px;
+    display: block;
+  }
+  canvas {
+    position: absolute;
+    top: 0; left: 0;
+  }
+  .panel {
+    max-width: 480px;
+    margin: 12px auto;
+    background: white;
+    border-radius: 16px;
+    padding: 14px;
+    box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+  }
+  .hands {
+    display: flex;
+    justify-content: space-around;
+    align-items: center;
+    font-size: 3em;
+    margin: 10px 0;
+  }
+  .hands .vs { font-size: 0.4em; color: #999; }
+  .label { font-size: 0.35em; display: block; color: #555; }
+  #countdown {
+    font-size: 4em;
+    font-weight: bold;
+    color: #ff6f61;
+    min-height: 1.2em;
+  }
+  #readyWrap {
+    max-width: 480px;
+    margin: 8px auto;
+  }
+  #readyText {
+    font-size: 1.1em;
+    font-weight: bold;
+    color: #4a90d9;
+    min-height: 1.4em;
+  }
+  #readyBarBg {
+    background: #eee;
+    border-radius: 20px;
+    height: 18px;
+    overflow: hidden;
+    box-shadow: inset 0 1px 3px rgba(0,0,0,0.15);
+  }
+  #readyBarFill {
+    background: linear-gradient(90deg, #ffd166, #ff6f61);
+    height: 100%;
+    width: 0%;
+    transition: width 0.05s linear;
+  }
+  button {
+    font-size: 1.2em;
+    padding: 14px 36px;
+    border: none;
+    border-radius: 40px;
+    background: #ff6f61;
+    color: white;
+    font-weight: bold;
+    box-shadow: 0 4px 0 #d1493c;
+    cursor: pointer;
+    margin-top: 8px;
+  }
+  button:active { transform: translateY(2px); box-shadow: 0 2px 0 #d1493c; }
+  button:disabled { background: #ccc; box-shadow: 0 4px 0 #999; }
+  #result {
+    font-size: 1.8em;
+    font-weight: bold;
+    margin-top: 6px;
+    min-height: 1.4em;
+  }
+  .win { color: #ff6f61; }
+  .lose { color: #4a90d9; }
+  .draw { color: #888; }
+  #score {
+    font-size: 1em;
+    color: #555;
+  }
+  #debug {
+    font-size: 0.8em;
+    color: #999;
+    margin-top: 6px;
+  }
+</style>
+</head>
+<body>
 
+<h1>📷 カメラでじゃんけん！</h1>
+<div id="status">カメラを準備しています…</div>
+
+<div class="stage">
+  <video id="video" autoplay playsinline muted></video>
+  <canvas id="overlay"></canvas>
+</div>
+
+<div class="panel">
+  <div id="countdown"></div>
+
+  <div id="readyWrap">
+    <div id="readyText">✋ パーを出してキープすると スタート！</div>
+    <div id="readyBarBg"><div id="readyBarFill"></div></div>
+  </div>
+
+  <button id="startBtn" disabled>ボタンでスタート（予備）</button>
+
+  <div class="hands">
+    <div>
+      <span id="userHand">？</span>
+      <span class="label">あなた</span>
+    </div>
+    <div class="vs">VS</div>
+    <div>
+      <span id="cpuHand">？</span>
+      <span class="label">スマホ</span>
+    </div>
+  </div>
+
+  <div id="result"></div>
+  <div id="score">あなたの勝ち: 0　スマホの勝ち: 0　あいこ: 0</div>
+  <div id="debug"></div>
+</div>
+
+<script type="module">
+import {
+  HandLandmarker,
+  FilesetResolver
+} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+
+const video = document.getElementById("video");
+const overlay = document.getElementById("overlay");
+const ctx = overlay.getContext("2d");
+const statusEl = document.getElementById("status");
+const startBtn = document.getElementById("startBtn");
+const countdownEl = document.getElementById("countdown");
+const userHandEl = document.getElementById("userHand");
+const cpuHandEl = document.getElementById("cpuHand");
+const resultEl = document.getElementById("result");
+const scoreEl = document.getElementById("score");
+const debugEl = document.getElementById("debug");
+const readyTextEl = document.getElementById("readyText");
+const readyBarFillEl = document.getElementById("readyBarFill");
+
+const HAND_EMOJI = { "グー": "✊", "チョキ": "✌️", "パー": "🖐️", "？": "？" };
+
+let handLandmarker;
+let running = false;
+let lastLandmarks = null;
+let score = { user: 0, cpu: 0, draw: 0 };
+
+// --- ハンドサインでスタートするための状態管理 ---
+const HOLD_MS = 900;        // パーを何ミリ秒キープしたらスタートするか
+const COOLDOWN_MS = 1800;   // 1回のじゃんけんが終わってから再度検出を始めるまでの待ち時間
+let gameInProgress = false;
+let holdStartTime = null;
+let cooldownUntil = 0;
+
+// --- 1. MediaPipe HandLandmarker の初期化 ---
+async function initHandLandmarker() {
+  const vision = await FilesetResolver.forVisionTasks(
+    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+  );
+  handLandmarker = await HandLandmarker.createFromOptions(vision, {
+    baseOptions: {
+      modelAssetPath:
+        "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+      delegate: "GPU"
+    },
+    runningMode: "VIDEO",
+    numHands: 1
+  });
+}
+
+// --- 2. カメラの起動 ---
+async function initCamera() {
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: "user", width: 480, height: 360 },
+    audio: false
+  });
+  video.srcObject = stream;
+  await new Promise((resolve) => (video.onloadedmetadata = resolve));
+  video.play();
+  overlay.width = video.videoWidth;
+  overlay.height = video.videoHeight;
+}
+
+// --- 3. 手のランドマークから グー/チョキ/パー を判定 ---
+function classifyGesture(landmarks) {
+  // 指先(tip)と第2関節(pip)の位置関係で、伸びているか曲がっているかを判定
+  // ランドマーク番号: https://developers.google.com/mediapipe/solutions/vision/hand_landmarker
+  const fingers = [
+    { tip: 8, pip: 6 },   // 人差し指
+    { tip: 12, pip: 10 }, // 中指
+    { tip: 16, pip: 14 }, // 薬指
+    { tip: 20, pip: 18 }  // 小指
+  ];
+
+  let extendedCount = 0;
+  for (const f of fingers) {
+    // カメラ画像は上下反転していないので、y座標が小さいほど上＝伸びている
+    if (landmarks[f.tip].y < landmarks[f.pip].y - 0.02) {
+      extendedCount++;
+    }
+  }
+
+  // 親指は横方向の位置で判定（左右反転しているのでx座標の大小に注意）
+  const thumbExtended =
+    Math.abs(landmarks[4].x - landmarks[17].x) >
+    Math.abs(landmarks[3].x - landmarks[17].x);
+
+  if (extendedCount === 0) return "グー";
+  if (extendedCount === 2 && landmarks[8].y < landmarks[6].y && landmarks[12].y < landmarks[10].y) {
+    return "チョキ";
+  }
+  if (extendedCount >= 4) return "パー";
+  return "？"; // はっきり判定できない形
+}
+
+// --- 4. 手の骨格を描画（子供が仕組みを見て楽しめるように） ---
+function drawLandmarks(landmarks) {
+  ctx.clearRect(0, 0, overlay.width, overlay.height);
+  ctx.fillStyle = "#ff6f61";
+  ctx.strokeStyle = "#4a90d9";
+  ctx.lineWidth = 2;
+
+  const connections = [
+    [0,1],[1,2],[2,3],[3,4],
+    [0,5],[5,6],[6,7],[7,8],
+    [0,9],[9,10],[10,11],[11,12],
+    [0,13],[13,14],[14,15],[15,16],
+    [0,17],[17,18],[18,19],[19,20],
+    [5,9],[9,13],[13,17]
+  ];
+  for (const [a, b] of connections) {
+    ctx.beginPath();
+    ctx.moveTo(landmarks[a].x * overlay.width, landmarks[a].y * overlay.height);
+    ctx.lineTo(landmarks[b].x * overlay.width, landmarks[b].y * overlay.height);
+    ctx.stroke();
+  }
+  for (const p of landmarks) {
+    ctx.beginPath();
+    ctx.arc(p.x * overlay.width, p.y * overlay.height, 4, 0, 2 * Math.PI);
+    ctx.fill();
+  }
+}
+
+// --- 5. 毎フレームの検出ループ ---
+function detectLoop() {
+  if (!running) return;
+  const nowMs = performance.now();
+  const result = handLandmarker.detectForVideo(video, nowMs);
+
+  let gesture = "？";
+  if (result.landmarks && result.landmarks.length > 0) {
+    lastLandmarks = result.landmarks[0];
+    drawLandmarks(lastLandmarks);
+    gesture = classifyGesture(lastLandmarks);
+    debugEl.textContent = "認識中: " + gesture;
+  } else {
+    lastLandmarks = null;
+    ctx.clearRect(0, 0, overlay.width, overlay.height);
+    debugEl.textContent = "手が見つかりません";
+  }
+
+  updateStartTrigger(gesture, nowMs);
+
+  requestAnimationFrame(detectLoop);
+}
+
+// --- 5b. 「パーを出してキープ」でスタートする仕組み ---
+function updateStartTrigger(gesture, nowMs) {
+  // じゃんけんの最中や、直後のクールダウン中は判定しない
+  if (gameInProgress || nowMs < cooldownUntil) {
+    readyTextEl.textContent = gameInProgress ? "じゃんけん中…" : "つぎの じゃんけんまで少しまってね";
+    readyBarFillEl.style.width = "0%";
+    holdStartTime = null;
+    return;
+  }
+
+  if (gesture === "パー") {
+    if (holdStartTime === null) holdStartTime = nowMs;
+    const elapsed = nowMs - holdStartTime;
+    const progress = Math.min(100, (elapsed / HOLD_MS) * 100);
+    readyBarFillEl.style.width = progress + "%";
+    readyTextEl.textContent = "✋ そのままキープ！";
+
+    if (elapsed >= HOLD_MS) {
+      holdStartTime = null;
+      readyBarFillEl.style.width = "0%";
+      playJanken();
+    }
+  } else {
+    holdStartTime = null;
+    readyBarFillEl.style.width = "0%";
+    readyTextEl.textContent = "✋ パーを出してキープすると スタート！";
+  }
+}
+
+// --- 6. じゃんけんの勝敗判定 ---
+function judge(user, cpu) {
+  if (user === "？") return null;
+  if (user === cpu) return "draw";
+  const winMap = { "グー": "チョキ", "チョキ": "パー", "パー": "グー" };
+  return winMap[user] === cpu ? "user" : "cpu";
+}
+
+// --- 7. じゃんけんスタートの流れ ---
+async function playJanken() {
+  if (gameInProgress) return; // 二重スタート防止
+  gameInProgress = true;
+  startBtn.disabled = true;
+  resultEl.textContent = "";
+  resultEl.className = "";
+  userHandEl.textContent = "？";
+  cpuHandEl.textContent = "？";
+
+  const counts = ["さいしょは", "グー", "じゃんけん", "ポン！"];
+  for (const text of counts) {
+    countdownEl.textContent = text;
+    await new Promise((r) => setTimeout(r, 700));
+  }
+
+  // 「ポン」の瞬間の手の形を判定
+  const userGesture = lastLandmarks ? classifyGesture(lastLandmarks) : "？";
+  const cpuOptions = ["グー", "チョキ", "パー"];
+  const cpuGesture = cpuOptions[Math.floor(Math.random() * 3)];
+
+  countdownEl.textContent = "";
+  userHandEl.textContent = HAND_EMOJI[userGesture];
+  cpuHandEl.textContent = HAND_EMOJI[cpuGesture];
+
+  if (userGesture === "？") {
+    resultEl.textContent = "手の形が読み取れなかったよ。もう一回！";
+    resultEl.className = "draw";
+    startBtn.disabled = false;
+    gameInProgress = false;
+    cooldownUntil = performance.now() + COOLDOWN_MS;
+    return;
+  }
+
+  const outcome = judge(userGesture, cpuGesture);
+  if (outcome === "draw") {
+    resultEl.textContent = "あいこ！";
+    resultEl.className = "draw";
+    score.draw++;
+  } else if (outcome === "user") {
+    resultEl.textContent = "あなたの勝ち！🎉";
+    resultEl.className = "win";
+    score.user++;
+  } else {
+    resultEl.textContent = "スマホの勝ち！";
+    resultEl.className = "lose";
+    score.cpu++;
+  }
+  scoreEl.textContent =
+    `あなたの勝ち: ${score.user}　スマホの勝ち: ${score.cpu}　あいこ: ${score.draw}`;
+
+  startBtn.disabled = false;
+  gameInProgress = false;
+  cooldownUntil = performance.now() + COOLDOWN_MS;
+}
+
+startBtn.addEventListener("click", playJanken);
+
+// --- 8. 初期化処理 ---
+(async function main() {
+  try {
+    statusEl.textContent = "AIモデルを読み込んでいます…";
+    await initHandLandmarker();
+    statusEl.textContent = "カメラを起動しています…";
+    await initCamera();
+    statusEl.textContent = "カメラに手を映して、パー✋を出してみよう！";
+    running = true;
+    detectLoop();
+    startBtn.disabled = false;
+  } catch (err) {
+    console.error(err);
+    statusEl.textContent =
+      "エラーが発生しました。カメラの利用を許可してください。(" + err.message + ")";
+  }
+})();
+</script>
+
+</body>
+</html>
